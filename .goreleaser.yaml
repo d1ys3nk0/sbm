@@ -1,0 +1,20 @@
+---
+
+version: 2
+builds:
+  - main: ./cmd/sbm
+    binary: sbm
+    env: [CGO_ENABLED=0]
+    goos: [darwin]
+    goarch: [amd64, arm64]
+    flags: [-trimpath]
+    ldflags:
+      - '-s -w -X main.version={{.Version}} -X main.commit={{.Commit}}'
+archives:
+  - name_template: "sbm_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    formats: [tar.gz]
+    files: [LICENSE, README.md]
+checksum:
+  name_template: checksums.txt
+changelog:
+  disable: true
