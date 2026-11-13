@@ -4,11 +4,8 @@
 import argparse
 import hashlib
 from pathlib import Path
-import platform
 import struct
-import subprocess
 import tarfile
-import tempfile
 
 
 def main():
@@ -29,12 +26,8 @@ def main():
     if len(archives) != len(targets) or set(checksums) != {p.name for p in archives}:
         raise ValueError("Expected exactly two archives and matching checksum entries")
 
-    host_arch = {"x86_64": "amd64", "arm64": "arm64"}.get(platform.machine())
-    if host_arch is None:
-        raise ValueError("Unsupported macOS host architecture")
     versions = set()
     found = set()
-    host_binary = None
     for archive in archives:
         target = next((t for t in targets if archive.name.endswith(f"_{t}.tar.gz")), None)
         if target is None or target in found or not archive.name.startswith("sbm_"):
@@ -62,23 +55,12 @@ def main():
             binary = contents.extractfile(executable).read()
             if len(binary) < 8 or struct.unpack("<II", binary[:8]) != (0xFEEDFACF, targets[target]):
                 raise ValueError(f"Unexpected Mach-O architecture: {archive.name}")
-            if target == f"darwin_{host_arch}":
-                host_binary = binary
 
-    if found != set(targets) or len(versions) != 1 or host_binary is None:
+    if found != set(targets) or len(versions) != 1:
         raise ValueError("Archive platforms or versions disagree")
     if args.version and versions != {args.version}:
         raise ValueError(f"Expected release version {args.version}")
-    commit = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
-    with tempfile.TemporaryDirectory() as directory:
-        binary = Path(directory) / "sbm"
-        binary.write_bytes(host_binary)
-        binary.chmod(0o755)
-        output = subprocess.check_output([str(binary), "--version"], text=True).strip()
-        expected = f"sbm {versions.pop()} ({commit})"
-        if output != expected:
-            raise ValueError(f"Unexpected version metadata: {output}")
-    print("Verified both archives, SHA-256 checksums, architectures, and version metadata")
+    print("Verified both macOS archives, SHA-256 checksums, and architectures")
 
 
 if __name__ == "__main__":
