@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -26,23 +27,38 @@ func (c *controller) probe(port int, secret, url, expected string) bool {
 	return result.code == 0 && result.stdout == expected
 }
 
-// bodyProbe requires a complete 32 KiB response through the tunnel. Try a
-// second provider before counting a download failure against the tunnel.
+// bodyProbe gives both providers the same deadline and drains both results
+// before the caller can change the probe route.
 func (c *controller) bodyProbe(secret string) bool {
-	if c.downloadProbe(secret, bodyCheckURL, "200 32768") {
-		return true
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	results := make(chan bool, 2)
+	go func() {
+		results <- c.downloadProbe(ctx, secret, bodyCheckURL, "200 32768")
+	}()
+	go func() {
+		results <- c.downloadProbe(ctx, secret, bodyFallbackURL, "206 32768", "--range", "0-32767")
+	}()
+
+	healthy := false
+	for range 2 {
+		if <-results {
+			healthy = true
+			cancel()
+		}
 	}
-	return c.downloadProbe(secret, bodyFallbackURL, "206 32768", "--range", "0-32767")
+	return healthy
 }
 
-func (c *controller) downloadProbe(secret, url, expected string, options ...string) bool {
+func (c *controller) downloadProbe(ctx context.Context, secret, url, expected string, options ...string) bool {
 	input := fmt.Sprintf("proxy-user = \"sbm:%s\"\n", secret)
 	args := []string{"-q", "--config", "-", "-fsS", "--max-time", "3",
 		"--noproxy", "", "--proxy", fmt.Sprintf("http://127.0.0.1:%d", probePort),
 		"--max-filesize", "32768", "-o", "/dev/null", "-w", "%{http_code} %{size_download}"}
 	args = append(args, options...)
-	result := c.run(3*time.Second, input, "/usr/bin/curl", append(args, url)...)
-	return result.code == 0 && result.stdout == expected
+	result := c.runCommand(ctx, input, "/usr/bin/curl", append(args, url)...)
+	return result.code == 0 && result.stdout == expected && ctx.Err() == nil
 }
 
 func (c *controller) uplinkProbe(secret string) bool {

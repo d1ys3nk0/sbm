@@ -2,6 +2,7 @@ package controller
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -9,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/d1ys3nk0/sbm/internal/inputs"
@@ -21,9 +23,9 @@ func testController(t *testing.T) *controller {
 		t.Fatal(err)
 	}
 	return &controller{root: root, bin: "/test/sing-box", out: &bytes.Buffer{}, errOut: &bytes.Buffer{},
-		now:   func() time.Time { return time.Unix(1000, 0) },
-		run:   func(_ time.Duration, _, _ string, _ ...string) result { return result{} },
-		fetch: func(string, string) (inputs.Snapshot, error) { return inputs.Snapshot{}, errors.New("offline") },
+		now:        func() time.Time { return time.Unix(1000, 0) },
+		runCommand: func(_ context.Context, _, _ string, _ ...string) result { return result{} },
+		fetch:      func(string, string) (inputs.Snapshot, error) { return inputs.Snapshot{}, errors.New("offline") },
 	}
 }
 
@@ -50,7 +52,7 @@ func policy(t *testing.T, c *controller) {
 func TestPublishPreservesActiveOnRejectedCandidate(t *testing.T) {
 	c := testController(t)
 	before := enable(t, c)
-	c.run = func(_ time.Duration, _, _ string, _ ...string) result { return result{code: 1} }
+	c.runCommand = func(_ context.Context, _, _ string, _ ...string) result { return result{code: 1} }
 	if _, err := c.publish("other", map[string]any{}, false); err == nil {
 		t.Fatal("expected validation failure")
 	}
@@ -84,7 +86,7 @@ func TestConnectUsesCachedSubscriptionOnFetchFailure(t *testing.T) {
 	if err := writeJSON(c.path("subscriptions/main.json"), snapshot); err != nil {
 		t.Fatal(err)
 	}
-	c.run = func(_ time.Duration, _, executable string, args ...string) result {
+	c.runCommand = func(_ context.Context, _, executable string, args ...string) result {
 		if executable == "/bin/launchctl" && args[0] == "print" {
 			return result{code: 113}
 		}
@@ -145,7 +147,7 @@ func TestWatchdogDoesNotRestartAfterManualStop(t *testing.T) {
 		t.Fatal(err)
 	}
 	restarts := 0
-	c.run = func(_ time.Duration, _, executable string, args ...string) result {
+	c.runCommand = func(_ context.Context, _, executable string, args ...string) result {
 		if executable == "/bin/launchctl" {
 			if args[0] == "kickstart" {
 				restarts++
@@ -180,7 +182,7 @@ func TestWatchdogRestartThresholdAndCooldown(t *testing.T) {
 	now := time.Unix(1000, 0)
 	c.now = func() time.Time { return now }
 	restarts := 0
-	c.run = func(_ time.Duration, _, executable string, args ...string) result {
+	c.runCommand = func(_ context.Context, _, executable string, args ...string) result {
 		if executable == "/bin/launchctl" {
 			if args[0] == "kickstart" {
 				restarts++
@@ -218,7 +220,7 @@ func TestWatchdogFailsWhenBodyStalls(t *testing.T) {
 	if err := writeJSON(c.path("applied.json"), generation); err != nil {
 		t.Fatal(err)
 	}
-	c.run = func(_ time.Duration, _, executable string, args ...string) result {
+	c.runCommand = func(_ context.Context, _, executable string, args ...string) result {
 		if executable == "/bin/launchctl" {
 			return result{}
 		}
@@ -254,7 +256,7 @@ func TestWatchdogHealthyRequiresFullBodyDownload(t *testing.T) {
 		t.Fatal(err)
 	}
 	var bodyURL, bodyFormat string
-	c.run = func(_ time.Duration, _, executable string, args ...string) result {
+	c.runCommand = func(_ context.Context, _, executable string, args ...string) result {
 		if executable == "/bin/launchctl" {
 			return result{}
 		}
@@ -311,7 +313,7 @@ func TestWatchdogCorroboratesBodyFailure(t *testing.T) {
 			}
 			c.now = func() time.Time { return time.Unix(1000, 0) }
 			restarts, fallbackCalls := 0, 0
-			c.run = func(_ time.Duration, _, executable string, args ...string) result {
+			c.runCommand = func(_ context.Context, _, executable string, args ...string) result {
 				if executable == "/bin/launchctl" && args[0] == "kickstart" {
 					restarts++
 				}
@@ -330,12 +332,12 @@ func TestWatchdogCorroboratesBodyFailure(t *testing.T) {
 					joined := strings.Join(args, " ")
 					for _, option := range []string{"--proxy http://127.0.0.1:17987", "--range 0-32767", "--max-filesize 32768"} {
 						if !strings.Contains(joined, option) {
-							t.Fatalf("fallback probe is missing %q", option)
+							t.Errorf("fallback probe is missing %q", option)
 						}
 					}
 					return tt.fallback
 				default:
-					t.Fatalf("unexpected curl target %q", args[len(args)-1])
+					t.Errorf("unexpected curl target %q", args[len(args)-1])
 					return result{}
 				}
 			}
@@ -360,7 +362,7 @@ func TestWatchdogCorroboratesBodyFailure(t *testing.T) {
 
 func TestReconcileFailsClosedOnProcessInspectionFailure(t *testing.T) {
 	c := testController(t)
-	c.run = func(_ time.Duration, _, executable string, args ...string) result {
+	c.runCommand = func(_ context.Context, _, executable string, args ...string) result {
 		if executable == "/bin/launchctl" && args[0] == "print" {
 			return result{code: 113}
 		}
@@ -384,7 +386,7 @@ func TestTailscaleRestoresSavedExitNode(t *testing.T) {
 		t.Fatal(err)
 	}
 	var called string
-	c.run = func(_ time.Duration, _, executable string, args ...string) result {
+	c.runCommand = func(_ context.Context, _, executable string, args ...string) result {
 		called = executable + " " + strings.Join(args, " ")
 		return result{}
 	}
@@ -410,7 +412,7 @@ func TestConnectFallsBackWhenRefreshedConfigIsRejected(t *testing.T) {
 		return inputs.Snapshot{URL: old.URL, Nodes: []map[string]any{{"type": "vless", "tag": "new"}}}, nil
 	}
 	checks := 0
-	c.run = func(_ time.Duration, _, executable string, args ...string) result {
+	c.runCommand = func(_ context.Context, _, executable string, args ...string) result {
 		if executable == c.bin {
 			checks++
 			if checks == 1 {
@@ -451,7 +453,7 @@ func TestTailscaleNullPrefsCannotDiscardRecoveryState(t *testing.T) {
 	if err := writeJSON(c.path("tailscale.json"), tailState{Exit: "100.64.0.1", LAN: true}); err != nil {
 		t.Fatal(err)
 	}
-	c.run = func(_ time.Duration, _, executable string, args ...string) result {
+	c.runCommand = func(_ context.Context, _, executable string, args ...string) result {
 		if executable == "/usr/bin/env" {
 			return result{stdout: "null"}
 		}
@@ -496,7 +498,7 @@ func TestWatchdogSwitchesOnlyToVerifiedNodes(t *testing.T) {
 	}
 	active, candidate := "first", ""
 	healthyNode := "second"
-	c.run = func(timeout time.Duration, _, executable string, args ...string) result {
+	c.runCommand = func(ctx context.Context, _, executable string, args ...string) result {
 		if executable == "/bin/launchctl" && args[0] == "kickstart" {
 			t.Fatal("node failure restarted sing-box")
 		}
@@ -529,7 +531,7 @@ func TestWatchdogSwitchesOnlyToVerifiedNodes(t *testing.T) {
 			return result{}
 		}
 		if target == bodyCheckURL || target == bodyFallbackURL {
-			if timeout != 3*time.Second || !strings.Contains(strings.Join(args, " "), "--max-time 3") {
+			if _, ok := ctx.Deadline(); !ok || !strings.Contains(strings.Join(args, " "), "--max-time 3") {
 				t.Error("body probe does not enforce three seconds")
 			}
 			if candidate != healthyNode {
@@ -562,5 +564,73 @@ func TestWatchdogSwitchesOnlyToVerifiedNodes(t *testing.T) {
 		if active != step.want {
 			t.Fatalf("selected %q, want %q", active, step.want)
 		}
+	}
+}
+
+func TestBodyProbeUsesSharedDeadline(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		c := testController(t)
+		started := make(chan time.Time, 2)
+		c.runCommand = func(ctx context.Context, _, _ string, _ ...string) result {
+			deadline, _ := ctx.Deadline()
+			started <- deadline
+			<-ctx.Done()
+			return result{code: 28}
+		}
+
+		start := time.Now()
+		if c.bodyProbe("test-secret") {
+			t.Fatal("two stalled downloads passed")
+		}
+		if elapsed := time.Since(start); elapsed != 3*time.Second {
+			t.Errorf("body probe took %s, want 3s", elapsed)
+		}
+		for range 2 {
+			if deadline := <-started; !deadline.Equal(start.Add(3 * time.Second)) {
+				t.Errorf("download deadline = %v, want %v", deadline, start.Add(3*time.Second))
+			}
+		}
+	})
+}
+
+func TestBodyProbeCancelsOtherDownload(t *testing.T) {
+	for _, winner := range []struct{ url, output string }{
+		{bodyCheckURL, "200 32768"},
+		{bodyFallbackURL, "206 32768"},
+	} {
+		t.Run(winner.output, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				c := testController(t)
+				otherStarted := make(chan struct{})
+				otherDone := make(chan error, 1)
+				c.runCommand = func(ctx context.Context, _, _ string, args ...string) result {
+					if args[len(args)-1] == winner.url {
+						select {
+						case <-otherStarted:
+							return result{stdout: winner.output}
+						case <-ctx.Done():
+							return result{code: 28}
+						}
+					}
+					close(otherStarted)
+					<-ctx.Done()
+					time.Sleep(time.Millisecond)
+					otherDone <- ctx.Err()
+					return result{code: 28}
+				}
+
+				if !c.bodyProbe("test-secret") {
+					t.Fatal("complete download did not pass")
+				}
+				select {
+				case err := <-otherDone:
+					if !errors.Is(err, context.Canceled) {
+						t.Errorf("second request ended with %v, want cancellation", err)
+					}
+				default:
+					t.Error("body probe returned before the other download exited")
+				}
+			})
+		})
 	}
 }

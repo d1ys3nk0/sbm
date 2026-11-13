@@ -48,13 +48,13 @@ type result struct {
 }
 
 type controller struct {
-	root   string
-	bin    string
-	out    io.Writer
-	errOut io.Writer
-	run    func(time.Duration, string, string, ...string) result
-	fetch  func(string, string) (inputs.Snapshot, error)
-	now    func() time.Time
+	root       string
+	bin        string
+	out        io.Writer
+	errOut     io.Writer
+	runCommand func(context.Context, string, string, ...string) result
+	fetch      func(string, string) (inputs.Snapshot, error)
+	now        func() time.Time
 }
 
 func defaultBinary() string {
@@ -64,9 +64,13 @@ func defaultBinary() string {
 	return "/opt/homebrew/bin/sing-box"
 }
 
-func command(timeout time.Duration, stdin, executable string, args ...string) result {
+func (c *controller) run(timeout time.Duration, stdin, executable string, args ...string) result {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
+	return c.runCommand(ctx, stdin, executable, args...)
+}
+
+func command(ctx context.Context, stdin, executable string, args ...string) result {
 	cmd := exec.CommandContext(ctx, executable, args...)
 	cmd.Stdin = strings.NewReader(stdin)
 	var stdout bytes.Buffer
@@ -94,7 +98,7 @@ func Main(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 		return errors.New("Run SBM with sudo")
 	}
 	syscall.Umask(0077)
-	c := &controller{root: defaultRoot, bin: defaultBinary(), out: stdout, errOut: stderr, run: command, fetch: inputs.FetchSubscription, now: time.Now}
+	c := &controller{root: defaultRoot, bin: defaultBinary(), out: stdout, errOut: stderr, runCommand: command, fetch: inputs.FetchSubscription, now: time.Now}
 	if err := c.configureBinary(); err != nil {
 		return err
 	}
