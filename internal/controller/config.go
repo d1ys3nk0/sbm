@@ -36,6 +36,10 @@ func (c *controller) build(nodes []map[string]any) (map[string]any, error) {
 	if err := readJSON(c.path("policy.json"), &policy); err != nil || policy == nil {
 		return nil, errors.New("Install a valid system network policy first")
 	}
+	return c.buildPolicy(policy, nodes)
+}
+
+func (c *controller) buildPolicy(policy map[string]any, nodes []map[string]any) (map[string]any, error) {
 	var group map[string]any
 	kept := []any{}
 	for _, value := range array(policy["outbounds"]) {
@@ -96,6 +100,7 @@ func (c *controller) build(nodes []map[string]any) (map[string]any, error) {
 	outbounds = append(outbounds, map[string]any{"type": "direct", "tag": "sbm-direct"})
 	policy["outbounds"] = outbounds
 	route := ensureObject(policy, "route")
+	requestedPhysical := route["auto_detect_interface"] == false
 	route["auto_detect_interface"] = true
 	for _, value := range array(route["rule_set"]) {
 		ruleSet := object(value)
@@ -125,6 +130,13 @@ func (c *controller) build(nodes []map[string]any) (map[string]any, error) {
 	}
 	policy["inbounds"] = inbounds
 	ensureObject(policy, "experimental")["clash_api"] = map[string]any{"external_controller": fmt.Sprintf("127.0.0.1:%d", apiPort), "secret": secret}
+	uplink, err := c.bindPhysicalUplink(policy)
+	if err != nil {
+		return nil, err
+	}
+	if requestedPhysical && uplink.Interface == "" {
+		return nil, errors.New("Policy requires physical uplink binding")
+	}
 	return policy, nil
 }
 

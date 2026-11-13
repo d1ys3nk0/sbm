@@ -19,7 +19,7 @@ import (
 func testController(t *testing.T) *controller {
 	t.Helper()
 	root := t.TempDir()
-	if err := os.Mkdir(filepath.Join(root, "subscriptions"), 0700); err != nil {
+	if err := os.Mkdir(filepath.Join(root, "profiles"), 0700); err != nil {
 		t.Fatal(err)
 	}
 	return &controller{root: root, bin: "/test/sing-box", out: &bytes.Buffer{}, errOut: &bytes.Buffer{},
@@ -74,7 +74,7 @@ func TestPublishMakesValidatedGenerationActive(t *testing.T) {
 		t.Fatalf("active generation = %q, %v", active, err)
 	}
 	var config map[string]any
-	if err := readJSON(c.path("active.json"), &config); err != nil || config["outbounds"] == nil {
+	if err := readJSON(c.path(active), &config); err != nil || config["outbounds"] == nil {
 		t.Fatalf("invalid active config: %v", err)
 	}
 }
@@ -83,7 +83,7 @@ func TestConnectUsesCachedSubscriptionOnFetchFailure(t *testing.T) {
 	c := testController(t)
 	policy(t, c)
 	snapshot := inputs.Snapshot{URL: "https://example.test/private", Nodes: []map[string]any{{"type": "vless", "tag": "node"}}}
-	if err := writeJSON(c.path("subscriptions/main.json"), snapshot); err != nil {
+	if err := writeJSON(c.path("profiles/main.json"), snapshot); err != nil {
 		t.Fatal(err)
 	}
 	c.runCommand = func(_ context.Context, _, executable string, args ...string) result {
@@ -117,7 +117,7 @@ func TestConnectUsesCachedSubscriptionOnFetchFailure(t *testing.T) {
 func TestConnectRejectsConcurrentSubscriptionChange(t *testing.T) {
 	c := testController(t)
 	snapshot := inputs.Snapshot{URL: "https://example.test/private", Nodes: []map[string]any{{"tag": "original"}}}
-	path := c.path("subscriptions/main.json")
+	path := c.path("profiles/main.json")
 	if err := writeJSON(path, snapshot); err != nil {
 		t.Fatal(err)
 	}
@@ -405,7 +405,7 @@ func TestConnectFallsBackWhenRefreshedConfigIsRejected(t *testing.T) {
 	c := testController(t)
 	policy(t, c)
 	old := inputs.Snapshot{URL: "https://example.test/private", Nodes: []map[string]any{{"type": "vless", "tag": "old"}}}
-	if err := writeJSON(c.path("subscriptions/main.json"), old); err != nil {
+	if err := writeJSON(c.path("profiles/main.json"), old); err != nil {
 		t.Fatal(err)
 	}
 	c.fetch = func(string, string) (inputs.Snapshot, error) {
@@ -434,7 +434,7 @@ func TestConnectFallsBackWhenRefreshedConfigIsRejected(t *testing.T) {
 		t.Fatalf("validation count = %d", checks)
 	}
 	var stored inputs.Snapshot
-	if err := readJSON(c.path("subscriptions/main.json"), &stored); err != nil {
+	if err := readJSON(c.path("profiles/main.json"), &stored); err != nil {
 		t.Fatal(err)
 	}
 	if stored.Nodes[0]["tag"] != "old" {

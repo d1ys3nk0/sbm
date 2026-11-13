@@ -52,6 +52,10 @@ def main():
                 raise ValueError(f"Unexpected archive contents: {archive.name}")
             if not all(m.isfile() and m.size > 0 for m in members):
                 raise ValueError(f"Expected nonempty regular files: {archive.name}")
+            for member in members:
+                data = contents.extractfile(member).read()
+                if (b"apex" + b"plane") in data.lower():
+                    raise ValueError(f"Obsolete branding in {archive.name}: {member.name}")
             executable = contents.getmember("sbm")
             if not executable.mode & 0o111:
                 raise ValueError(f"Nonexecutable sbm: {archive.name}")

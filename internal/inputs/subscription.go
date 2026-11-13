@@ -37,6 +37,14 @@ type entry struct {
 }
 
 func FetchSubscription(source, singBox string) (Snapshot, error) {
+	return FetchSubscriptionContext(context.Background(), source, singBox)
+}
+
+func FetchSubscriptionContext(ctx context.Context, source, singBox string) (Snapshot, error) {
+	return FetchSubscriptionIn(ctx, source, singBox, "")
+}
+
+func FetchSubscriptionIn(ctx context.Context, source, singBox, privateDir string) (Snapshot, error) {
 	snapshot := Snapshot{URL: source, Labels: map[string]string{}}
 	u, err := url.Parse(source)
 	if err != nil || u.Scheme != "https" || u.Hostname() == "" || u.User != nil {
@@ -48,7 +56,7 @@ func FetchSubscription(source, singBox string) (Snapshot, error) {
 		}
 		return nil
 	}}
-	req, err := http.NewRequest(http.MethodGet, source, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, source, nil)
 	if err != nil {
 		return snapshot, errors.New("Subscription download or validation failed")
 	}
@@ -70,7 +78,7 @@ func FetchSubscription(source, singBox string) (Snapshot, error) {
 		return snapshot, errors.New("Subscription download or validation failed")
 	}
 	for _, item := range entries {
-		valid, err := validateNode(item.outbound, singBox)
+		valid, err := validateNodeContext(ctx, item.outbound, singBox, privateDir)
 		if err != nil {
 			return snapshot, errors.New("Subscription download or validation failed")
 		}
@@ -86,7 +94,11 @@ func FetchSubscription(source, singBox string) (Snapshot, error) {
 }
 
 func validateNode(node map[string]any, binary string) (bool, error) {
-	dir, err := os.MkdirTemp("", "sbm-subscribe-")
+	return validateNodeContext(context.Background(), node, binary, "")
+}
+
+func validateNodeContext(parent context.Context, node map[string]any, binary, privateDir string) (bool, error) {
+	dir, err := os.MkdirTemp(privateDir, "candidate-subscription-")
 	if err != nil {
 		return false, err
 	}
@@ -99,7 +111,7 @@ func validateNode(node map[string]any, binary string) (bool, error) {
 	if err = os.WriteFile(path, data, 0600); err != nil {
 		return false, err
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	ctx, cancel := context.WithTimeout(parent, 15*time.Second)
 	defer cancel()
 	err = exec.CommandContext(ctx, binary, "check", "-c", path).Run()
 	if ctx.Err() != nil {
