@@ -2,7 +2,9 @@ package controller
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -105,7 +107,7 @@ func TestConnectUsesCachedSubscriptionOnFetchFailure(t *testing.T) {
 	if err := readJSON(c.path(generation), &active); err != nil {
 		t.Fatal(err)
 	}
-	if len(array(active["outbounds"])) != 4 {
+	if len(array(active["outbounds"])) != 6 {
 		t.Fatalf("unexpected outbounds: %v", active["outbounds"])
 	}
 }
@@ -470,5 +472,95 @@ func TestReconcileDoesNotRewriteUnchangedAppliedState(t *testing.T) {
 	}
 	if _, err := os.Stat(c.path("applied.json")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("idle state was written: %v", err)
+	}
+}
+
+func TestWatchdogSwitchesOnlyToVerifiedNodes(t *testing.T) {
+	c := testController(t)
+	policy(t, c)
+	config, err := c.build([]map[string]any{
+		{"type": "vless", "tag": "first"},
+		{"type": "vless", "tag": "second"},
+		{"type": "vless", "tag": "third"},
+		{"type": "vless", "tag": "fourth"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	generation, err := c.publish("main", config, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := writeJSON(c.path("applied.json"), generation); err != nil {
+		t.Fatal(err)
+	}
+	active, candidate := "first", ""
+	healthyNode := "second"
+	c.run = func(timeout time.Duration, _, executable string, args ...string) result {
+		if executable == "/bin/launchctl" && args[0] == "kickstart" {
+			t.Fatal("node failure restarted sing-box")
+		}
+		if executable != "/usr/bin/curl" {
+			return result{}
+		}
+		target := args[len(args)-1]
+		if strings.Contains(target, "/proxies/") {
+			if !strings.Contains(strings.Join(args, " "), "--request PUT") {
+				return result{stdout: fmt.Sprintf(`{"now":%q}`, active)}
+			}
+			var node string
+			for i, arg := range args {
+				if arg == "--data" {
+					var selection struct{ Name string }
+					if err := json.Unmarshal([]byte(args[i+1]), &selection); err != nil {
+						t.Fatal(err)
+					}
+					node = selection.Name
+				}
+			}
+			if strings.HasSuffix(target, "/PROXY") {
+				if node != "sbm-unavailable" && node != healthyNode {
+					t.Fatalf("routed user traffic through unverified node %q", node)
+				}
+				active = node
+			} else {
+				candidate = node
+			}
+			return result{}
+		}
+		if target == bodyCheckURL || target == bodyFallbackURL {
+			if timeout != 3*time.Second || !strings.Contains(strings.Join(args, " "), "--max-time 3") {
+				t.Error("body probe does not enforce three seconds")
+			}
+			if candidate != healthyNode {
+				return result{code: 28}
+			}
+			if target == bodyFallbackURL {
+				return result{stdout: "206 32768"}
+			}
+			return result{stdout: "200 32768"}
+		}
+		if target == checkURL {
+			return result{stdout: "204"}
+		}
+		return result{stdout: "200"}
+	}
+	for _, step := range []struct {
+		healthyNode string
+		want        string
+	}{
+		{"second", "second"},
+		{"second", "second"},
+		{"", "sbm-unavailable"},
+		{"third", "sbm-unavailable"},
+		{"third", "third"},
+	} {
+		healthyNode = step.healthyNode
+		if err := c.watchdog(); err != nil {
+			t.Fatal(err)
+		}
+		if active != step.want {
+			t.Fatalf("selected %q, want %q", active, step.want)
+		}
 	}
 }

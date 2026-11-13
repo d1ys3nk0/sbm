@@ -25,7 +25,9 @@ sudo sbm stop
 
 For `subscribe main -`, enter the subscription URL on standard input. A URL supplied as the final argument can appear in shell history and process listings. The subscription and generated configuration contain private connection details.
 
-The watchdog reconciles saved connection intent at boot, checks health every 30 seconds, and limits automatic recovery attempts. `stop` clears the saved intent. Run `sudo sbm update-geoip` to refresh the local GeoIP rule set when the policy uses it.
+The watchdog reconciles saved connection intent at boot and checks health every 30 seconds. A node must download a complete 32 KiB response within three seconds. If the Cloudflare probe fails, SBM tries the same size against OVHcloud with its own three-second timeout. If both fail, SBM disconnects traffic routed through that node and checks other nodes before selecting one. VPN-routed traffic waits for a healthy node if none passes. `stop` clears the saved intent. Run `sudo sbm update-geoip` to refresh the local GeoIP rule set when the policy uses it.
+
+After upgrading, run `sudo sbm connect <subscription>` to regenerate the active configuration for automatic node switching. Older saved configurations use the previous restart-based recovery until regenerated.
 
 ## Development and releases
 

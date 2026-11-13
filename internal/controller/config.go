@@ -7,6 +7,11 @@ import (
 	"fmt"
 )
 
+const (
+	probeSelector   = "sbm-probe-selector"
+	unavailableNode = "sbm-unavailable"
+)
+
 func object(value any) map[string]any {
 	m, _ := value.(map[string]any)
 	return m
@@ -52,7 +57,11 @@ func (c *controller) build(nodes []map[string]any) (map[string]any, error) {
 	if !ok || tag == "" {
 		return nil, errors.New("System proxy group must have a tag")
 	}
-	used := map[string]bool{tag: true, "sbm-direct": true}
+	used := map[string]bool{"sbm-direct": true, probeSelector: true, unavailableNode: true}
+	if used[tag] {
+		return nil, errors.New("System policy uses a reserved SBM outbound tag")
+	}
+	used[tag] = true
 	for _, value := range kept {
 		outboundTag, ok := object(value)["tag"].(string)
 		if !ok || outboundTag == "" || used[outboundTag] {
@@ -69,8 +78,17 @@ func (c *controller) build(nodes []map[string]any) (map[string]any, error) {
 		used[nodeTag] = true
 		members = append(members, nodeTag)
 	}
+	if len(members) == 0 {
+		return nil, errors.New("No subscription nodes to select")
+	}
 	delete(policy, "proxy_binding")
-	outbounds := []any{map[string]any{"type": "urltest", "tag": tag, "outbounds": members, "url": checkURL, "interval": "1m", "tolerance": 50, "interrupt_exist_connections": false}}
+	trafficMembers := append([]any{unavailableNode}, members...)
+	outbounds := []any{
+		map[string]any{"type": "selector", "tag": tag, "outbounds": trafficMembers,
+			"default": unavailableNode, "interrupt_exist_connections": true},
+		map[string]any{"type": "selector", "tag": probeSelector, "outbounds": members},
+		map[string]any{"type": "block", "tag": unavailableNode},
+	}
 	outbounds = append(outbounds, kept...)
 	for _, node := range nodes {
 		outbounds = append(outbounds, node)
@@ -86,7 +104,7 @@ func (c *controller) build(nodes []map[string]any) (map[string]any, error) {
 		}
 	}
 	rules := []any{
-		map[string]any{"inbound": []string{"sbm-probe"}, "outbound": tag},
+		map[string]any{"inbound": []string{"sbm-probe"}, "outbound": probeSelector},
 		map[string]any{"inbound": []string{"sbm-uplink"}, "outbound": "sbm-direct"},
 	}
 	route["rules"] = append(rules, array(route["rules"])...)
@@ -110,14 +128,41 @@ func (c *controller) build(nodes []map[string]any) (map[string]any, error) {
 	return policy, nil
 }
 
-func (c *controller) apiSecret(generation string) (string, error) {
-	var config map[string]any
+type proxyConfig struct {
+	Secret  string
+	Traffic string
+	Nodes   []string
+}
+
+func (c *controller) proxyConfig(generation string) (proxyConfig, error) {
+	var config struct {
+		Experimental struct {
+			ClashAPI struct {
+				Secret string
+			} `json:"clash_api"`
+		}
+		Outbounds []struct {
+			Type      string
+			Tag       string
+			Outbounds []string
+		}
+	}
 	if err := readJSON(c.path(generation), &config); err != nil {
-		return "", errors.New("Could not read active SBM generation")
+		return proxyConfig{}, errors.New("Could not read active SBM generation")
 	}
-	secret, ok := object(object(config["experimental"])["clash_api"])["secret"].(string)
-	if !ok || secret == "" {
-		return "", errors.New("Active SBM generation has no probe secret")
+	proxy := proxyConfig{Secret: config.Experimental.ClashAPI.Secret}
+	if proxy.Secret == "" {
+		return proxyConfig{}, errors.New("Active SBM generation has no probe secret")
 	}
-	return secret, nil
+	for _, outbound := range config.Outbounds {
+		if outbound.Type != "selector" {
+			continue
+		}
+		if outbound.Tag == probeSelector {
+			proxy.Nodes = outbound.Outbounds
+		} else {
+			proxy.Traffic = outbound.Tag
+		}
+	}
+	return proxy, nil
 }

@@ -15,6 +15,7 @@ type healthState struct {
 	Healthy     bool    `json:"healthy"`
 	LastRestart float64 `json:"last_restart"`
 	CheckedAt   float64 `json:"checked_at"`
+	NextNode    int     `json:"next_node,omitempty"`
 }
 
 func (c *controller) probe(port int, secret, url, expected string) bool {
@@ -36,11 +37,11 @@ func (c *controller) bodyProbe(secret string) bool {
 
 func (c *controller) downloadProbe(secret, url, expected string, options ...string) bool {
 	input := fmt.Sprintf("proxy-user = \"sbm:%s\"\n", secret)
-	args := []string{"-q", "--config", "-", "-fsS", "--max-time", "6",
+	args := []string{"-q", "--config", "-", "-fsS", "--max-time", "3",
 		"--noproxy", "", "--proxy", fmt.Sprintf("http://127.0.0.1:%d", probePort),
 		"--max-filesize", "32768", "-o", "/dev/null", "-w", "%{http_code} %{size_download}"}
 	args = append(args, options...)
-	result := c.run(15*time.Second, input, "/usr/bin/curl", append(args, url)...)
+	result := c.run(3*time.Second, input, "/usr/bin/curl", append(args, url)...)
 	return result.code == 0 && result.stdout == expected
 }
 
@@ -58,7 +59,8 @@ func (c *controller) uplinkProbe(secret string) bool {
 }
 
 func (c *controller) watchdog() error {
-	var generation, secret string
+	var generation string
+	var proxy proxyConfig
 	err := c.locked(func() error {
 		var err error
 		generation, err = c.active()
@@ -74,13 +76,20 @@ func (c *controller) watchdog() error {
 			return err
 		}
 		if generation != "" {
-			secret, err = c.apiSecret(generation)
+			proxy, err = c.proxyConfig(generation)
 		}
 		return err
 	})
 	if err != nil || generation == "" {
 		return err
 	}
+	if len(proxy.Nodes) > 0 {
+		return c.watchNodes(generation, proxy)
+	}
+	return c.watchLegacy(generation, proxy.Secret)
+}
+
+func (c *controller) watchLegacy(generation, secret string) error {
 	healthy := c.probe(probePort, secret, checkURL, "204") && c.bodyProbe(secret)
 	uplink := healthy || c.uplinkProbe(secret)
 	return c.locked(func() error {
@@ -120,7 +129,8 @@ func (c *controller) watchdog() error {
 }
 
 func (c *controller) status() error {
-	var generation, secret, selectedName string
+	var generation, selectedName string
+	var proxy proxyConfig
 	var health healthState
 	var labels map[string]string
 	var running bool
@@ -143,7 +153,7 @@ func (c *controller) status() error {
 				return err
 			}
 			labels = snapshot.Labels
-			secret, err = c.apiSecret(generation)
+			proxy, err = c.proxyConfig(generation)
 			if err != nil {
 				return err
 			}
@@ -176,28 +186,31 @@ func (c *controller) status() error {
 		}
 	}
 	fmt.Fprintf(c.out, "Desired: %s\nProcess: %s\nLast probe: %s\n", selectedName, process, lastProbe)
-	if running && secret != "" {
-		input := fmt.Sprintf("header = \"Authorization: Bearer %s\"\n", secret)
-		result := c.run(15*time.Second, input, "/usr/bin/curl", "--config", "-", "-fsS", "--max-time", "3",
-			"--noproxy", "*", fmt.Sprintf("http://127.0.0.1:%d/proxies", apiPort))
+	if running && proxy.Secret != "" {
+		result := c.proxyAPI(proxy.Secret, "", nil)
 		if result.code == 0 {
 			var response struct {
 				Proxies map[string]struct {
-					Type string `json:"type"`
-					Now  string `json:"now"`
-				} `json:"proxies"`
+					Type string
+					Now  string
+				}
 			}
 			if json.Unmarshal([]byte(result.stdout), &response) != nil {
 				return errors.New("Could not read SBM proxy status")
 			}
-			for _, group := range response.Proxies {
-				if strings.EqualFold(group.Type, "urltest") {
+			for tag, group := range response.Proxies {
+				if (proxy.Traffic != "" && tag == proxy.Traffic) ||
+					(proxy.Traffic == "" && strings.EqualFold(group.Type, "urltest")) {
 					selected := group.Now
-					if selected == "" {
+					switch selected {
+					case "":
 						selected = "pending"
-					}
-					if label := labels[selected]; label != "" {
-						selected = label
+					case unavailableNode:
+						selected = "no healthy node"
+					default:
+						if label := labels[selected]; label != "" {
+							selected = label
+						}
 					}
 					fmt.Fprintf(c.out, "Selected: %s\n", selected)
 				}
