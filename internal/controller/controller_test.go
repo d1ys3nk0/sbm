@@ -210,6 +210,131 @@ func TestWatchdogRestartThresholdAndCooldown(t *testing.T) {
 	}
 }
 
+func TestWatchdogFailsWhenBodyStalls(t *testing.T) {
+	c := testController(t)
+	generation := enable(t, c)
+	if err := writeJSON(c.path("applied.json"), generation); err != nil {
+		t.Fatal(err)
+	}
+	c.run = func(_ time.Duration, _, executable string, args ...string) result {
+		if executable == "/bin/launchctl" {
+			return result{}
+		}
+		if executable == "/usr/bin/curl" {
+			joined := strings.Join(args, " ")
+			switch {
+			case strings.Contains(joined, bodyCheckURL):
+				return result{code: 28}
+			case strings.Contains(joined, "17987"):
+				return result{stdout: "204"}
+			default:
+				return result{stdout: "200"}
+			}
+		}
+		return result{}
+	}
+	if err := c.watchdog(); err != nil {
+		t.Fatal(err)
+	}
+	var health healthState
+	if err := readJSON(c.path("health.json"), &health); err != nil {
+		t.Fatal(err)
+	}
+	if health.Healthy || health.Failures != 1 {
+		t.Fatalf("health = %+v", health)
+	}
+}
+
+func TestWatchdogHealthyRequiresFullBodyDownload(t *testing.T) {
+	c := testController(t)
+	generation := enable(t, c)
+	if err := writeJSON(c.path("applied.json"), generation); err != nil {
+		t.Fatal(err)
+	}
+	var bodyURL, bodyFormat string
+	c.run = func(_ time.Duration, _, executable string, args ...string) result {
+		if executable == "/bin/launchctl" {
+			return result{}
+		}
+		if executable == "/usr/bin/curl" {
+			joined := strings.Join(args, " ")
+			switch {
+			case strings.Contains(joined, bodyCheckURL):
+				bodyURL = args[len(args)-1]
+				for i, arg := range args {
+					if arg == "-w" && i+1 < len(args) {
+						bodyFormat = args[i+1]
+					}
+				}
+				return result{stdout: bodyCheckResult}
+			case strings.Contains(joined, "17987"):
+				return result{stdout: "204"}
+			default:
+				return result{stdout: "200"}
+			}
+		}
+		return result{}
+	}
+	if err := c.watchdog(); err != nil {
+		t.Fatal(err)
+	}
+	var health healthState
+	if err := readJSON(c.path("health.json"), &health); err != nil {
+		t.Fatal(err)
+	}
+	if !health.Healthy || health.Failures != 0 {
+		t.Fatalf("health = %+v", health)
+	}
+	if bodyURL != bodyCheckURL || bodyFormat != "%{http_code} %{size_download}" {
+		t.Fatalf("body probe args: url=%q format=%q", bodyURL, bodyFormat)
+	}
+}
+
+func TestWatchdogRestartsWhenBodyStalls(t *testing.T) {
+	c := testController(t)
+	generation := enable(t, c)
+	if err := writeJSON(c.path("applied.json"), generation); err != nil {
+		t.Fatal(err)
+	}
+	c.now = func() time.Time { return time.Unix(1000, 0) }
+	restarts := 0
+	c.run = func(_ time.Duration, _, executable string, args ...string) result {
+		if executable == "/bin/launchctl" {
+			if args[0] == "kickstart" {
+				restarts++
+			}
+			return result{}
+		}
+		if executable == "/usr/bin/curl" {
+			joined := strings.Join(args, " ")
+			switch {
+			case strings.Contains(joined, bodyCheckURL):
+				return result{code: 28}
+			case strings.Contains(joined, "17987"):
+				return result{stdout: "204"}
+			default:
+				return result{stdout: "200"}
+			}
+		}
+		return result{}
+	}
+	for i := 0; i < 3; i++ {
+		if err := c.watchdog(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if restarts != 1 {
+		t.Fatalf("got %d restarts, want one", restarts)
+	}
+	var health healthState
+	if err := readJSON(c.path("health.json"), &health); err != nil {
+		t.Fatal(err)
+	}
+	if health.Healthy {
+		t.Fatal("stalled body reported healthy")
+	}
+}
+
 func TestReconcileFailsClosedOnProcessInspectionFailure(t *testing.T) {
 	c := testController(t)
 	c.run = func(_ time.Duration, _, executable string, args ...string) result {

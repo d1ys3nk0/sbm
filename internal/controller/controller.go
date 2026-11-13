@@ -24,13 +24,15 @@ import (
 )
 
 const (
-	defaultRoot = "/Library/Application Support/apexplane-sbm"
-	job         = "system/com.apexplane.sbm"
-	checkURL    = "https://www.gstatic.com/generate_204"
-	uplinkURL   = "https://www.apple.com/library/test/success.html"
-	probePort   = 17987
-	directPort  = 17988
-	apiPort     = 17986
+	defaultRoot     = "/Library/Application Support/apexplane-sbm"
+	job             = "system/com.apexplane.sbm"
+	checkURL        = "https://www.gstatic.com/generate_204"
+	bodyCheckURL    = "https://speed.cloudflare.com/__down?bytes=32768"
+	bodyCheckResult = "200 32768"
+	uplinkURL       = "https://www.apple.com/library/test/success.html"
+	probePort       = 17987
+	directPort      = 17988
+	apiPort         = 17986
 )
 
 var (

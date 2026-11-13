@@ -25,6 +25,16 @@ func (c *controller) probe(port int, secret, url, expected string) bool {
 	return result.code == 0 && result.stdout == expected
 }
 
+// bodyProbe downloads a fixed-size response through the proxy. It catches
+// tunnels that answer the header probe but stall the response body.
+func (c *controller) bodyProbe(port int, secret string) bool {
+	input := fmt.Sprintf("proxy-user = \"sbm:%s\"\n", secret)
+	result := c.run(15*time.Second, input, "/usr/bin/curl", "--config", "-", "-fsS", "--max-time", "6",
+		"--noproxy", "", "--proxy", fmt.Sprintf("http://127.0.0.1:%d", port),
+		"-o", "/dev/null", "-w", "%{http_code} %{size_download}", bodyCheckURL)
+	return result.code == 0 && result.stdout == bodyCheckResult
+}
+
 func (c *controller) uplinkProbe(secret string) bool {
 	if c.probe(directPort, secret, uplinkURL, "200") {
 		return true
@@ -62,7 +72,7 @@ func (c *controller) watchdog() error {
 	if err != nil || generation == "" {
 		return err
 	}
-	healthy := c.probe(probePort, secret, checkURL, "204")
+	healthy := c.probe(probePort, secret, checkURL, "204") && c.bodyProbe(probePort, secret)
 	uplink := healthy || c.uplinkProbe(secret)
 	return c.locked(func() error {
 		current, err := c.active()
