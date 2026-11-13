@@ -25,14 +25,23 @@ func (c *controller) probe(port int, secret, url, expected string) bool {
 	return result.code == 0 && result.stdout == expected
 }
 
-// bodyProbe downloads a fixed-size response through the proxy. It catches
-// tunnels that answer the header probe but stall the response body.
-func (c *controller) bodyProbe(port int, secret string) bool {
+// bodyProbe requires a complete 32 KiB response through the tunnel. Try a
+// second provider before counting a download failure against the tunnel.
+func (c *controller) bodyProbe(secret string) bool {
+	if c.downloadProbe(secret, bodyCheckURL, "200 32768") {
+		return true
+	}
+	return c.downloadProbe(secret, bodyFallbackURL, "206 32768", "--range", "0-32767")
+}
+
+func (c *controller) downloadProbe(secret, url, expected string, options ...string) bool {
 	input := fmt.Sprintf("proxy-user = \"sbm:%s\"\n", secret)
-	result := c.run(15*time.Second, input, "/usr/bin/curl", "--config", "-", "-fsS", "--max-time", "6",
-		"--noproxy", "", "--proxy", fmt.Sprintf("http://127.0.0.1:%d", port),
-		"-o", "/dev/null", "-w", "%{http_code} %{size_download}", bodyCheckURL)
-	return result.code == 0 && result.stdout == bodyCheckResult
+	args := []string{"-q", "--config", "-", "-fsS", "--max-time", "6",
+		"--noproxy", "", "--proxy", fmt.Sprintf("http://127.0.0.1:%d", probePort),
+		"--max-filesize", "32768", "-o", "/dev/null", "-w", "%{http_code} %{size_download}"}
+	args = append(args, options...)
+	result := c.run(15*time.Second, input, "/usr/bin/curl", append(args, url)...)
+	return result.code == 0 && result.stdout == expected
 }
 
 func (c *controller) uplinkProbe(secret string) bool {
@@ -72,7 +81,7 @@ func (c *controller) watchdog() error {
 	if err != nil || generation == "" {
 		return err
 	}
-	healthy := c.probe(probePort, secret, checkURL, "204") && c.bodyProbe(probePort, secret)
+	healthy := c.probe(probePort, secret, checkURL, "204") && c.bodyProbe(secret)
 	uplink := healthy || c.uplinkProbe(secret)
 	return c.locked(func() error {
 		current, err := c.active()

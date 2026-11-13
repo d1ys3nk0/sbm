@@ -223,7 +223,7 @@ func TestWatchdogFailsWhenBodyStalls(t *testing.T) {
 		if executable == "/usr/bin/curl" {
 			joined := strings.Join(args, " ")
 			switch {
-			case strings.Contains(joined, bodyCheckURL):
+			case strings.Contains(joined, bodyCheckURL), strings.Contains(joined, bodyFallbackURL):
 				return result{code: 28}
 			case strings.Contains(joined, "17987"):
 				return result{stdout: "204"}
@@ -266,7 +266,7 @@ func TestWatchdogHealthyRequiresFullBodyDownload(t *testing.T) {
 						bodyFormat = args[i+1]
 					}
 				}
-				return result{stdout: bodyCheckResult}
+				return result{stdout: "200 32768"}
 			case strings.Contains(joined, "17987"):
 				return result{stdout: "204"}
 			default:
@@ -290,48 +290,69 @@ func TestWatchdogHealthyRequiresFullBodyDownload(t *testing.T) {
 	}
 }
 
-func TestWatchdogRestartsWhenBodyStalls(t *testing.T) {
-	c := testController(t)
-	generation := enable(t, c)
-	if err := writeJSON(c.path("applied.json"), generation); err != nil {
-		t.Fatal(err)
-	}
-	c.now = func() time.Time { return time.Unix(1000, 0) }
-	restarts := 0
-	c.run = func(_ time.Duration, _, executable string, args ...string) result {
-		if executable == "/bin/launchctl" {
-			if args[0] == "kickstart" {
-				restarts++
+func TestWatchdogCorroboratesBodyFailure(t *testing.T) {
+	for _, tt := range []struct {
+		name     string
+		fallback result
+		healthy  bool
+		restarts int
+	}{
+		{name: "fallback succeeds", fallback: result{stdout: "206 32768"}, healthy: true},
+		{name: "fallback stalls", fallback: result{code: 28, stdout: "206 5516"}, restarts: 1},
+		{name: "fallback returns a short body", fallback: result{stdout: "206 4096"}, restarts: 1},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			c := testController(t)
+			generation := enable(t, c)
+			if err := writeJSON(c.path("applied.json"), generation); err != nil {
+				t.Fatal(err)
 			}
-			return result{}
-		}
-		if executable == "/usr/bin/curl" {
-			joined := strings.Join(args, " ")
-			switch {
-			case strings.Contains(joined, bodyCheckURL):
-				return result{code: 28}
-			case strings.Contains(joined, "17987"):
-				return result{stdout: "204"}
-			default:
-				return result{stdout: "200"}
+			c.now = func() time.Time { return time.Unix(1000, 0) }
+			restarts, fallbackCalls := 0, 0
+			c.run = func(_ time.Duration, _, executable string, args ...string) result {
+				if executable == "/bin/launchctl" && args[0] == "kickstart" {
+					restarts++
+				}
+				if executable != "/usr/bin/curl" {
+					return result{}
+				}
+				switch args[len(args)-1] {
+				case bodyCheckURL:
+					return result{code: 28, stdout: "200 5516"}
+				case checkURL:
+					return result{stdout: "204"}
+				case uplinkURL:
+					return result{stdout: "200"}
+				case bodyFallbackURL:
+					fallbackCalls++
+					joined := strings.Join(args, " ")
+					for _, option := range []string{"--proxy http://127.0.0.1:17987", "--range 0-32767", "--max-filesize 32768"} {
+						if !strings.Contains(joined, option) {
+							t.Fatalf("fallback probe is missing %q", option)
+						}
+					}
+					return tt.fallback
+				default:
+					t.Fatalf("unexpected curl target %q", args[len(args)-1])
+					return result{}
+				}
 			}
-		}
-		return result{}
-	}
-	for i := 0; i < 3; i++ {
-		if err := c.watchdog(); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if restarts != 1 {
-		t.Fatalf("got %d restarts, want one", restarts)
-	}
-	var health healthState
-	if err := readJSON(c.path("health.json"), &health); err != nil {
-		t.Fatal(err)
-	}
-	if health.Healthy {
-		t.Fatal("stalled body reported healthy")
+			for i := 0; i < 3; i++ {
+				if err := c.watchdog(); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if restarts != tt.restarts || fallbackCalls != 3 {
+				t.Fatalf("got %d restarts and %d fallback probes, want %d and 3", restarts, fallbackCalls, tt.restarts)
+			}
+			var health healthState
+			if err := readJSON(c.path("health.json"), &health); err != nil {
+				t.Fatal(err)
+			}
+			if health.Healthy != tt.healthy || health.Failures != 0 {
+				t.Fatalf("health = %+v, want healthy=%t with no pending failures", health, tt.healthy)
+			}
+		})
 	}
 }
 

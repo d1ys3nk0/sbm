@@ -28,7 +28,7 @@ const (
 	job             = "system/com.apexplane.sbm"
 	checkURL        = "https://www.gstatic.com/generate_204"
 	bodyCheckURL    = "https://speed.cloudflare.com/__down?bytes=32768"
-	bodyCheckResult = "200 32768"
+	bodyFallbackURL = "https://lil1-rbx.speedtest.network.ovh.net/files/1Mb.dat"
 	uplinkURL       = "https://www.apple.com/library/test/success.html"
 	probePort       = 17987
 	directPort      = 17988
