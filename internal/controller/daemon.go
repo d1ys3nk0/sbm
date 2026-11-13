@@ -269,6 +269,11 @@ func (d *daemon) handle(req Request) (Status, <-chan struct{}, error) {
 		}
 	}
 	if req.Action == "start" || req.Action == "run" {
+		if d.controller != nil {
+			if err := d.controller.pendingSession(); err != nil {
+				return Status{}, nil, err
+			}
+		}
 		// A finished worker can still have a cancel function until it is reaped.
 		if err := d.stopWorker(); err != nil {
 			return Status{}, nil, err
@@ -303,6 +308,11 @@ func (d *daemon) handle(req Request) (Status, <-chan struct{}, error) {
 		return Status{}, nil, err
 	}
 	if req.Action == "stop" {
+		if d.controller != nil {
+			if err := d.controller.recoverStopped(); err != nil {
+				return Status{}, nil, err
+			}
+		}
 		return d.snapshot(), nil, nil
 	}
 	done := d.launch(req.Profile, req.Action == "start")
@@ -372,14 +382,17 @@ func serveDaemon(ctx context.Context, c *controller) error {
 		return c.runSession(ctx, profile.Name, state)
 	}, status: Status{State: "stopped", SavedProfile: saved}}
 	if saved != "" {
-		d.session, err = lockSession(ctx, root)
-		if err != nil {
-			control.Close()
-			return err
+		if err := d.resumeBackground(saved); err != nil {
+			fmt.Fprintln(os.Stderr, "sbm: could not recover saved session:", err)
+			d.status.State = "failed"
+			d.status.Error = "network recovery failed; check private logs"
 		}
-		d.launch(saved, true)
 	} else if session, err := lockSession(ctx, root); err == nil {
-		if err := c.tailscale(false); err != nil {
+		if err := c.recoverStopped(); err != nil {
+			fmt.Fprintln(os.Stderr, "sbm: could not clean stale network state:", err)
+			d.status.State = "failed"
+			d.status.Error = "network recovery failed; check private logs"
+		} else if err := c.tailscale(false); err != nil {
 			fmt.Fprintln(os.Stderr, "sbm: could not clean stale network state:", err)
 			d.status.State = "failed"
 			d.status.Error = "network recovery failed; check private logs"
@@ -509,7 +522,7 @@ func (c *controller) scheduleIdleGeoIP(ctx context.Context) {
 			return
 		}
 		defer session.Close()
-		if err := c.updateGeoIP(ctx, true, nil, nil); err != nil && ctx.Err() == nil {
+		if err := c.updateIdleGeoIP(ctx, true); err != nil && ctx.Err() == nil {
 			fmt.Fprintln(c.errOut, "SBM GeoIP scheduled update failed")
 		}
 	}
@@ -542,7 +555,7 @@ func (d *daemon) updateGeoIP() (Status, <-chan struct{}, error) {
 			return Status{}, nil, err
 		}
 		defer session.Close()
-		err = c.updateGeoIP(d.ctx, false, nil, nil)
+		err = c.updateIdleGeoIP(d.ctx, false)
 		return d.snapshot(), nil, err
 	}
 	if c.geoipUpdates == nil {
@@ -564,4 +577,18 @@ func (d *daemon) updateGeoIP() (Status, <-chan struct{}, error) {
 	case <-done:
 		return Status{}, nil, errors.New("Session stopped during update")
 	}
+}
+
+func (d *daemon) resumeBackground(name string) error {
+	session, err := lockSession(d.ctx, d.root)
+	if err != nil {
+		return err
+	}
+	if err := d.controller.recoverStopped(); err != nil {
+		session.Close()
+		return err
+	}
+	d.session = session
+	d.launch(name, true)
+	return nil
 }

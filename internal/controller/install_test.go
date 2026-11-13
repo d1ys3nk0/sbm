@@ -93,6 +93,12 @@ func TestInstallRepeatUpgradeAndUninstallPreserveData(t *testing.T) {
 			t.Fatalf("uninstall retained %s", path)
 		}
 	}
+	if info, err := os.Stat(i.recordPath()); err != nil || info.Mode().Perm() != 0600 {
+		t.Fatal("private installation ownership state was not preserved")
+	}
+	if filepath.Dir(i.recordPath()) != i.dataDir {
+		t.Fatal("installation state escaped private data directory")
+	}
 	if data, err := os.ReadFile(secret); err != nil || string(data) != "private profile" {
 		t.Fatal("uninstall removed private data")
 	}

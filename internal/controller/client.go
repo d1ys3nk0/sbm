@@ -55,7 +55,7 @@ func (c *controller) request(ctx context.Context, req Request) (statusReply, err
 		}
 		defer session.Close()
 		control.Close()
-		return statusReply{}, c.updateGeoIP(ctx, false, nil, nil)
+		return statusReply{}, c.updateIdleGeoIP(ctx, false)
 	}
 	if req.Action != "status" && req.Action != "stop" {
 		return statusReply{}, errors.New("Cannot contact the system SBM service")
@@ -65,6 +65,9 @@ func (c *controller) request(ctx context.Context, req Request) (statusReply, err
 		status, err = OfflineStatus(c.root)
 	} else {
 		status, err = StopOffline(ctx, c.root)
+		if err == nil {
+			err = c.recoverStopped()
+		}
 	}
 	if err != nil {
 		return statusReply{}, err

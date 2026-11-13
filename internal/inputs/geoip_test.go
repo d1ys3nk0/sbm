@@ -258,3 +258,44 @@ func TestGeoIPFirstActivationFailureRestoresAbsentFile(t *testing.T) {
 	}
 	geoAssertNoJournal(t, root)
 }
+
+func TestGeoIPIdleDemandIncludesLocalProfilesWithoutChangingActivePolicy(t *testing.T) {
+	root, options, calls := geoFixture(t)
+	geoWrite(t, root, "policy.json", []byte(`{}`))
+	if err := os.Mkdir(filepath.Join(root, "profiles"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	geoWrite(t, root, "profiles/local.json", []byte(`{"policy":{"route":{"rule_set":[{"tag":"geoip-ru","type":"local","path":"/source/ru.srs"}]}}}`))
+	policy, err := GeoIPPolicy(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	options.policy = policy
+	if err := updateGeoIP(root, true, options); err != nil {
+		t.Fatal(err)
+	}
+	if *calls != 1 {
+		t.Fatal("idle update ignored local profile")
+	}
+	options.policy = nil
+	if err := updateGeoIP(root, false, options); err != nil {
+		t.Fatal(err)
+	}
+	if *calls != 1 {
+		t.Fatal("active host policy was overridden by unrelated local profile")
+	}
+}
+
+func TestGeoIPIdleDemandRefusesRedirectedProfile(t *testing.T) {
+	root, _, _ := geoFixture(t)
+	geoWrite(t, root, "policy.json", []byte(`{}`))
+	if err := os.Mkdir(filepath.Join(root, "profiles"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(root, "policy.json"), filepath.Join(root, "profiles/local.json")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := GeoIPPolicy(root); err == nil {
+		t.Fatal("accepted redirected local profile")
+	}
+}

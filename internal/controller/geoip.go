@@ -12,3 +12,14 @@ func (c *controller) updateGeoIP(ctx context.Context, scheduled bool, policy map
 	}
 	return inputs.UpdateGeoIPForPolicyContext(ctx, c.root, c.bin, scheduled, policy, activate)
 }
+
+func (c *controller) updateIdleGeoIP(ctx context.Context, scheduled bool) error {
+	if err := c.pendingSession(); err != nil {
+		return err
+	}
+	policy, err := inputs.GeoIPPolicy(c.root)
+	if err != nil {
+		return err
+	}
+	return c.updateGeoIP(ctx, scheduled, policy, nil)
+}

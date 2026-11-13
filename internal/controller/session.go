@@ -16,6 +16,9 @@ var errUplinkChanged = errors.New("physical uplink changed")
 // runSession owns its child directly; no persisted PID is used to signal it.
 func (c *controller) runSession(ctx context.Context, name string, state func(string)) (retErr error) {
 	state("connecting")
+	if err := c.pendingSession(); err != nil {
+		return errors.Join(errSessionCleanup, err)
+	}
 	processes := c.run(15*time.Second, "", "/usr/bin/pgrep", "-x", "sing-box")
 	if processes.code != 1 {
 		return errors.New("Another sing-box process is running or cannot be inspected")
@@ -37,12 +40,24 @@ func (c *controller) runSession(ctx context.Context, name string, state func(str
 	if err := c.prepareContext(ctx, name, false); err != nil {
 		return err
 	}
+	var cmd *exec.Cmd
 	defer func() {
+		if cmd != nil {
+			err := writeJSON(c.path("session-recovery.json"), sessionRecovery{PID: cmd.Process.Pid})
+			retErr = errors.Join(retErr, errSessionCleanup, errors.New("sing-box termination not confirmed"), err)
+			return
+		}
 		if err := c.tailscale(false); err != nil {
 			retErr = errors.Join(retErr, errSessionCleanup, err)
 		}
+		if retErr != nil && errors.Is(retErr, errSessionCleanup) {
+			return
+		}
 		if err := c.locked(func() error {
 			if err := os.Remove(c.path("active.json")); err != nil && !errors.Is(err, os.ErrNotExist) {
+				return err
+			}
+			if err := os.Remove(c.path("session-recovery.json")); err != nil && !errors.Is(err, os.ErrNotExist) {
 				return err
 			}
 			return syncDir(c.root)
@@ -96,9 +111,14 @@ func (c *controller) runSession(ctx context.Context, name string, state func(str
 		return errors.New("Could not open private sing-box log")
 	}
 	defer log.Close()
-	var cmd *exec.Cmd
 	var exited chan error
 	start := func() error {
+		if err := os.Remove(c.path("session-recovery.json")); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		if err := syncDir(c.root); err != nil {
+			return err
+		}
 		cmd = exec.Command(c.bin, "run", "-c", c.path(generation))
 		cmd.Stdout, cmd.Stderr = log, log
 		if err := cmd.Start(); err != nil {
@@ -106,38 +126,31 @@ func (c *controller) runSession(ctx context.Context, name string, state func(str
 			return errors.New("Could not start sing-box")
 		}
 		exited = make(chan error, 1)
-		process := cmd
-		go func() { exited <- process.Wait() }()
+		process, result := cmd, exited
+		go func() { result <- process.Wait() }()
+		if err := writeJSON(c.path("session-recovery.json"), sessionRecovery{PID: process.Process.Pid}); err != nil {
+			return errors.New("Could not persist session recovery record")
+		}
 		return nil
 	}
 	stop := func() error {
 		if cmd == nil {
 			return nil
 		}
-		process := cmd
-		cmd = nil
-		if err := process.Process.Signal(syscall.SIGTERM); err != nil && !errors.Is(err, os.ErrProcessDone) {
+		if err := stopOwnedChild(cmd.Process, exited, 5*time.Second, 5*time.Second); err != nil {
 			return err
 		}
-		select {
-		case <-exited:
-			return nil
-		case <-time.After(5 * time.Second):
-			if err := process.Process.Kill(); err != nil && !errors.Is(err, os.ErrProcessDone) {
-				return err
-			}
-			<-exited
-			return nil
-		}
-	}
-	if err := start(); err != nil {
-		return err
+		cmd = nil
+		return nil
 	}
 	defer func() {
 		if err := stop(); err != nil {
 			retErr = errors.Join(retErr, errSessionCleanup, err)
 		}
 	}()
+	if err := start(); err != nil {
+		return err
+	}
 	activate := func() error {
 		if err := ctx.Err(); err != nil {
 			return err

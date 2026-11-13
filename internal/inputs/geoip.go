@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 )
@@ -191,6 +192,53 @@ func recoverGeoActivation(root string, activate func() error) error {
 	return restoreGeoActivation(root, activation, activate)
 }
 
+func needsGeoIP(policy map[string]any) bool {
+	route, _ := policy["route"].(map[string]any)
+	rules, _ := route["rule_set"].([]any)
+	for _, value := range rules {
+		rule, _ := value.(map[string]any)
+		if rule["tag"] == "geoip-ru" {
+			return true
+		}
+	}
+	return false
+}
+
+// GeoIPPolicy selects configured demand for idle updates. Active sessions pass
+// their own policy so that an unrelated profile cannot restart the session.
+func GeoIPPolicy(root string) (map[string]any, error) {
+	var policy map[string]any
+	if err := readJSON(filepath.Join(root, "policy.json"), &policy); err != nil {
+		return nil, errors.New("Invalid host policy for GeoIP scheduling")
+	}
+	if needsGeoIP(policy) {
+		return policy, nil
+	}
+	profiles, err := os.ReadDir(filepath.Join(root, "profiles"))
+	if errors.Is(err, os.ErrNotExist) {
+		return map[string]any{}, nil
+	}
+	if err != nil {
+		return nil, errors.New("Could not inspect saved GeoIP policy")
+	}
+	for _, entry := range profiles {
+		if !strings.HasSuffix(entry.Name(), ".json") {
+			continue
+		}
+		if !entry.Type().IsRegular() {
+			return nil, errors.New("Saved GeoIP policy is not a regular file")
+		}
+		var profile LocalProfile
+		if err := readJSON(filepath.Join(root, "profiles", entry.Name()), &profile); err != nil {
+			return nil, errors.New("Could not inspect saved GeoIP policy")
+		}
+		if needsGeoIP(profile.Policy) {
+			return profile.Policy, nil
+		}
+	}
+	return map[string]any{}, nil
+}
+
 func updateGeoIP(root string, scheduled bool, options geoOptions) error {
 	var err error
 	policy := options.policy
@@ -199,15 +247,7 @@ func updateGeoIP(root string, scheduled bool, options geoOptions) error {
 			return err
 		}
 	}
-	needed := false
-	route, _ := policy["route"].(map[string]any)
-	ruleSets, _ := route["rule_set"].([]any)
-	for _, value := range ruleSets {
-		rule, _ := value.(map[string]any)
-		if rule["tag"] == "geoip-ru" {
-			needed = true
-		}
-	}
+	needed := needsGeoIP(policy)
 	if !needed {
 		if _, err := os.Lstat(filepath.Join(root, "geoip-activation.json")); errors.Is(err, os.ErrNotExist) {
 			return nil
