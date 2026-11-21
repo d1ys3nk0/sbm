@@ -13,8 +13,23 @@ import (
 var errSessionCleanup = errors.New("session cleanup failed")
 var errUplinkChanged = errors.New("physical uplink changed")
 
+type verifiedNode struct {
+	id, label string
+}
+
+func (c *controller) verifiedSelection(ctx context.Context, generation string, proxy proxyConfig) (string, error) {
+	node, err := c.watchNodes(generation, proxy)
+	if err != nil || node == "" {
+		return "", err
+	}
+	if c.checkRoutes(ctx) != nil {
+		return "", nil
+	}
+	return node, nil
+}
+
 // runSession owns its child directly; no persisted PID is used to signal it.
-func (c *controller) runSession(ctx context.Context, name string, state func(string)) (retErr error) {
+func (c *controller) runSession(ctx context.Context, name string, state func(string), probe func(verifiedNode)) (retErr error) {
 	state("connecting")
 	if err := c.pendingSession(); err != nil {
 		return errors.Join(errSessionCleanup, err)
@@ -40,6 +55,9 @@ func (c *controller) runSession(ctx context.Context, name string, state func(str
 	if err := c.prepareContext(ctx, name, false); err != nil {
 		return err
 	}
+	// A subscription refresh can replace the labels alongside the saved nodes.
+	var display struct{ Labels map[string]string }
+	_ = readJSON(path, &display)
 	var cmd *exec.Cmd
 	defer func() {
 		if cmd != nil {
@@ -168,12 +186,9 @@ func (c *controller) runSession(ctx context.Context, name string, state func(str
 		state("running")
 		deadline := time.Now().Add(30 * time.Second)
 		for time.Now().Before(deadline) && ctx.Err() == nil {
-			if err := c.watchNodes(generation, proxy); err == nil {
-				var health healthState
-				if readJSON(c.path("health.json"), &health) == nil && health.Generation == generation && health.Healthy && c.checkRoutes(ctx) == nil {
-					state("healthy")
-					return nil
-				}
+			if node, err := c.verifiedSelection(ctx, generation, proxy); err == nil && node != "" {
+				state("healthy")
+				return nil
 			}
 			if !pause(ctx, time.Second) {
 				break
@@ -218,15 +233,19 @@ func (c *controller) runSession(ctx context.Context, name string, state func(str
 			if err != nil || current != uplink {
 				return errUplinkChanged
 			}
-			if err := c.watchNodes(generation, proxy); err != nil {
-				state("unhealthy")
-				fmt.Fprintln(c.errOut, "SBM health check failed")
+			node, err := c.verifiedSelection(ctx, generation, proxy)
+			if err == nil && node != "" {
+				state("healthy")
+				label := display.Labels[node]
+				if label == "" {
+					label = node
+				}
+				probe(verifiedNode{id: node, label: label})
 			} else {
-				var health healthState
-				if readJSON(c.path("health.json"), &health) == nil && health.Generation == generation && health.Healthy && c.checkRoutes(ctx) == nil {
-					state("healthy")
-				} else {
-					state("unhealthy")
+				state("unhealthy")
+				probe(verifiedNode{})
+				if err != nil {
+					fmt.Fprintln(c.errOut, "SBM health check failed")
 				}
 			}
 			ticker.Reset(30 * time.Second)

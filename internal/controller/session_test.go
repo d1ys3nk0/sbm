@@ -39,7 +39,7 @@ func TestSessionStopsOwnedChildAndClearsRuntime(t *testing.T) {
 			if state == "running" {
 				started <- struct{}{}
 			}
-		})
+		}, func(verifiedNode) {})
 	}()
 	select {
 	case <-started:
@@ -82,8 +82,8 @@ func TestStopCancelsRefreshAndDoesNotRestartSession(t *testing.T) {
 		<-ctx.Done()
 		return inputs.Snapshot{}, ctx.Err()
 	}
-	d := &daemon{ctx: context.Background(), root: c.root, controller: c, status: Status{State: "stopped"}, run: func(ctx context.Context, profile sessionProfile, state func(string)) error {
-		return c.runSession(ctx, profile.Name, state)
+	d := &daemon{ctx: context.Background(), root: c.root, controller: c, status: Status{State: "stopped"}, run: func(ctx context.Context, profile sessionProfile, state func(string), probe func(verifiedNode)) error {
+		return c.runSession(ctx, profile.Name, state, probe)
 	}}
 	if _, _, err := d.handle(Request{Action: "start", Profile: "office"}); err != nil {
 		t.Fatal(err)

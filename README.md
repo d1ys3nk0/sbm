@@ -31,6 +31,12 @@ For hosts requiring physical-uplink binding, the private `/var/lib/sbm/physical-
 
 `sudo sbm update-geoip` updates the applicable GeoIP rule set. SBM checks at startup, repeats successful checks after seven days, and retries failures hourly. During a session, a changed rule set is activated by restarting the owned sing-box process and verifying node connectivity and configured routes; failed activation restores the previous rules and retains a recovery journal if restoration cannot be confirmed. Configure optional private route checks in `/var/lib/sbm/route-checks.json` as a JSON array of objects containing `name`, `url`, and optional `expected_status` (default 200). These checks can cover proxy, direct, and tailnet destinations.
 
+## macOS notifications
+
+SBM posts macOS notifications when a session connects, loses its verified connection, recovers, disconnects, or switches nodes. A switch shows the previous and current node, and a recovery shows both when the node changed.
+
+Both foreground and background sessions deliver alerts to the active desktop user. Events that happen with no desktop user are skipped. In System Settings → Notifications, look for Script Editor or the sender macOS associates with AppleScript. Focus and the sender’s settings control banners and previews.
+
 ## Development and releases
 
 Install Go 1.27.4 and run `go test -race ./...` and `go vet ./...`. A canonical version tag triggers the release workflow, which publishes Apple Silicon and Intel macOS archives and `checksums.txt` after checks pass.

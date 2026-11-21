@@ -100,7 +100,8 @@ func (c *controller) watchdog() error {
 		return err
 	}
 	if len(proxy.Nodes) > 0 {
-		return c.watchNodes(generation, proxy)
+		_, err := c.watchNodes(generation, proxy)
+		return err
 	}
 	return c.watchLegacy(generation, proxy.Secret)
 }

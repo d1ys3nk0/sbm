@@ -477,7 +477,7 @@ func TestReconcileDoesNotRewriteUnchangedAppliedState(t *testing.T) {
 	}
 }
 
-func TestWatchdogSwitchesOnlyToVerifiedNodes(t *testing.T) {
+func TestVerifiedSelectionAfterFailoverAndRouteChecks(t *testing.T) {
 	c := testController(t)
 	policy(t, c)
 	config, err := c.build([]map[string]any{
@@ -496,9 +496,18 @@ func TestWatchdogSwitchesOnlyToVerifiedNodes(t *testing.T) {
 	if err := writeJSON(c.path("applied.json"), generation); err != nil {
 		t.Fatal(err)
 	}
+	proxy, err := c.proxyConfig(generation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const routeURL = "https://example.org/route"
+	if err := writeJSON(c.path("route-checks.json"), []routeCheck{{Name: "route", URL: routeURL}}); err != nil {
+		t.Fatal(err)
+	}
 	active, candidate := "first", ""
 	healthyNode := "second"
-	c.runCommand = func(ctx context.Context, _, executable string, args ...string) result {
+	routeFails, selectionFails := false, false
+	c.runCommand = func(ctx context.Context, input, executable string, args ...string) result {
 		if executable == "/bin/launchctl" && args[0] == "kickstart" {
 			t.Fatal("node failure restarted sing-box")
 		}
@@ -524,6 +533,9 @@ func TestWatchdogSwitchesOnlyToVerifiedNodes(t *testing.T) {
 				if node != "sbm-unavailable" && node != healthyNode {
 					t.Fatalf("routed user traffic through unverified node %q", node)
 				}
+				if node != "sbm-unavailable" && selectionFails {
+					return result{code: 1}
+				}
 				active = node
 			} else {
 				candidate = node
@@ -545,24 +557,33 @@ func TestWatchdogSwitchesOnlyToVerifiedNodes(t *testing.T) {
 		if target == checkURL {
 			return result{stdout: "204"}
 		}
+		if routeFails && strings.Contains(input, routeURL) {
+			return result{code: 1}
+		}
 		return result{stdout: "200"}
 	}
 	for _, step := range []struct {
-		healthyNode string
-		want        string
+		healthyNode    string
+		wantSelection  string
+		wantVerified   string
+		routeFails     bool
+		selectionFails bool
 	}{
-		{"second", "second"},
-		{"second", "second"},
-		{"", "sbm-unavailable"},
-		{"third", "sbm-unavailable"},
-		{"third", "third"},
+		{"second", "second", "second", false, false},
+		{"second", "second", "", true, false},
+		{"second", "second", "second", false, false},
+		{"", "sbm-unavailable", "", false, false},
+		{"third", "sbm-unavailable", "", false, false},
+		{"third", "sbm-unavailable", "", false, true},
+		{"third", "third", "third", false, false},
 	} {
-		healthyNode = step.healthyNode
-		if err := c.watchdog(); err != nil {
-			t.Fatal(err)
+		healthyNode, routeFails, selectionFails = step.healthyNode, step.routeFails, step.selectionFails
+		got, err := c.verifiedSelection(context.Background(), generation, proxy)
+		if (err != nil) != selectionFails || got != step.wantVerified {
+			t.Fatalf("verified %q, error %v, want %q", got, err, step.wantVerified)
 		}
-		if active != step.want {
-			t.Fatalf("selected %q, want %q", active, step.want)
+		if active != step.wantSelection {
+			t.Fatalf("selected %q, want %q", active, step.wantSelection)
 		}
 	}
 }

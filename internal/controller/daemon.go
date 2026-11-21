@@ -12,6 +12,8 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/d1ys3nk0/sbm/internal/desktopnotify"
 )
 
 type Request struct {
@@ -70,7 +72,7 @@ func (s Status) MarshalJSON() ([]byte, error) {
 
 type sessionProfile struct{ Name string }
 
-type runner func(context.Context, sessionProfile, func(string)) error
+type runner func(context.Context, sessionProfile, func(string), func(verifiedNode)) error
 
 type daemon struct {
 	ctx        context.Context
@@ -78,6 +80,7 @@ type daemon struct {
 	controller *controller
 	run        runner
 	load       func(string) (sessionProfile, error)
+	notify     func(string)
 	control    sync.Mutex
 	mu         sync.Mutex
 	status     Status
@@ -159,6 +162,13 @@ func (d *daemon) launch(name string, persistent bool) <-chan struct{} {
 		if session != nil {
 			defer session.Close()
 		}
+		notifications := sessionNotifications{profile: name, notify: d.notify}
+		cleanupFailed := false
+		defer func() {
+			if ctx.Err() != nil && !cleanupFailed {
+				notifications.disconnect()
+			}
+		}()
 		delay := 5 * time.Second
 		for ctx.Err() == nil {
 			profile, err := d.loadProfile(name)
@@ -175,9 +185,15 @@ func (d *daemon) launch(name string, persistent bool) <-chan struct{} {
 					delay = 5 * time.Second
 				}
 				d.setState(state)
+			}, func(node verifiedNode) {
+				if ctx.Err() == nil {
+					notifications.observe(node)
+				}
 			})
+			cleanupFailed = errors.Is(err, errSessionCleanup)
 			if ctx.Err() != nil {
-				if errors.Is(err, errSessionCleanup) {
+				if cleanupFailed {
+					notifications.observe(verifiedNode{})
 					d.mu.Lock()
 					d.status.State = "failed"
 					d.status.Error = "network recovery failed; check private logs"
@@ -188,7 +204,8 @@ func (d *daemon) launch(name string, persistent bool) <-chan struct{} {
 				}
 				return
 			}
-			if errors.Is(err, errSessionCleanup) {
+			notifications.observe(verifiedNode{})
+			if cleanupFailed {
 				d.mu.Lock()
 				d.status.State = "failed"
 				d.status.Error = "network recovery failed; check private logs"
@@ -378,8 +395,10 @@ func serveDaemon(ctx context.Context, c *controller) error {
 		control.Close()
 		return err
 	}
-	d := daemon{ctx: ctx, root: root, controller: c, run: func(ctx context.Context, profile sessionProfile, state func(string)) error {
-		return c.runSession(ctx, profile.Name, state)
+	notifications := desktopnotify.New("SBM")
+	defer notifications.Close()
+	d := daemon{ctx: ctx, root: root, controller: c, notify: notifications.Notify, run: func(ctx context.Context, profile sessionProfile, state func(string), probe func(verifiedNode)) error {
+		return c.runSession(ctx, profile.Name, state, probe)
 	}, status: Status{State: "stopped", SavedProfile: saved}}
 	if saved != "" {
 		if err := d.resumeBackground(saved); err != nil {
@@ -432,8 +451,10 @@ func foreground(ctx context.Context, c *controller, name string, ready chan<- er
 		ready <- err
 		return err
 	}
-	d := &daemon{ctx: ctx, root: root, controller: c, run: func(ctx context.Context, profile sessionProfile, state func(string)) error {
-		return c.runSession(ctx, profile.Name, state)
+	notifications := desktopnotify.New("SBM")
+	defer notifications.Close()
+	d := &daemon{ctx: ctx, root: root, controller: c, notify: notifications.Notify, run: func(ctx context.Context, profile sessionProfile, state func(string), probe func(verifiedNode)) error {
+		return c.runSession(ctx, profile.Name, state, probe)
 	}, status: Status{State: "stopped"}, foreground: true}
 	return foregroundSession(ctx, d, name, ready)
 }

@@ -8,7 +8,9 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
+	"testing/synctest"
 	"time"
 )
 
@@ -23,11 +25,20 @@ func TestForegroundSocketAndExclusiveSession(t *testing.T) {
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			started := make(chan struct{})
+			var alerts []string
 			d := &daemon{
 				ctx: ctx, root: root, foreground: true, status: Status{State: "stopped"},
-				load: func(string) (sessionProfile, error) { return sessionProfile{}, nil },
-				run: func(ctx context.Context, _ sessionProfile, state func(string)) error {
-					state("connected")
+				notify: func(body string) { alerts = append(alerts, body) },
+				load:   func(string) (sessionProfile, error) { return sessionProfile{}, nil },
+				run: func(ctx context.Context, _ sessionProfile, state func(string), probe func(verifiedNode)) error {
+					state("running")
+					probe(verifiedNode{"first", "North"})
+					probe(verifiedNode{"second", "West"})
+					probe(verifiedNode{})
+					probe(verifiedNode{})
+					probe(verifiedNode{"second", "West"})
+					probe(verifiedNode{})
+					probe(verifiedNode{"third", "East"})
 					close(started)
 					<-ctx.Done()
 					return ctx.Err()
@@ -78,6 +89,18 @@ func TestForegroundSocketAndExclusiveSession(t *testing.T) {
 			case <-time.After(time.Second):
 				t.Fatal("foreground did not exit")
 			}
+			want := []string{
+				"Connected · office · North",
+				"Node switched · office · North → West",
+				"Connection lost · office · West",
+				"Connection recovered · office · West",
+				"Connection lost · office · West",
+				"Connection recovered · office · West → East",
+				"Disconnected · office · East",
+			}
+			if !slices.Equal(alerts, want) {
+				t.Fatalf("alerts = %q, want %q", alerts, want)
+			}
 			if saved, err := readIntent(root); err != nil || saved != "" {
 				t.Fatalf("foreground persisted intent: %q, %v", saved, err)
 			}
@@ -109,7 +132,7 @@ func TestSavedProfileSurvivesDaemonRestartAndStopCancels(t *testing.T) {
 				}
 				return sessionProfile{}, nil
 			},
-			run: func(ctx context.Context, _ sessionProfile, state func(string)) error {
+			run: func(ctx context.Context, _ sessionProfile, state func(string), _ func(verifiedNode)) error {
 				state("connecting")
 				close(started)
 				<-ctx.Done()
@@ -152,7 +175,7 @@ func TestStartAndToggleRequireStoppingBeforeProfileChange(t *testing.T) {
 	d := &daemon{
 		ctx: context.Background(), root: root, status: Status{State: "stopped"},
 		load: func(string) (sessionProfile, error) { return sessionProfile{}, nil },
-		run: func(ctx context.Context, _ sessionProfile, state func(string)) error {
+		run: func(ctx context.Context, _ sessionProfile, state func(string), _ func(verifiedNode)) error {
 			state("connecting")
 			started <- struct{}{}
 			<-ctx.Done()
@@ -191,7 +214,7 @@ func TestStopCancelsInProgressGeoIPUpdate(t *testing.T) {
 	updating := make(chan struct{})
 	d := &daemon{ctx: context.Background(), root: root, controller: c, status: Status{State: "stopped"},
 		load: func(string) (sessionProfile, error) { return sessionProfile{}, nil },
-		run: func(ctx context.Context, _ sessionProfile, state func(string)) error {
+		run: func(ctx context.Context, _ sessionProfile, state func(string), _ func(verifiedNode)) error {
 			state("running")
 			close(started)
 			select {
@@ -258,4 +281,59 @@ func TestIdleGeoIPDoesNotBlockStopAndCancelsOnShutdown(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("shutdown did not cancel idle update")
 	}
+}
+
+func TestBackgroundNotificationsAcrossAutomaticRetry(t *testing.T) {
+	root := t.TempDir()
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		alerts := make(chan string, 16)
+		attempts := 0
+		d := &daemon{
+			ctx: ctx, root: root, status: Status{State: "stopped"},
+			load:   func(string) (sessionProfile, error) { return sessionProfile{}, nil },
+			notify: func(body string) { alerts <- body },
+			run: func(ctx context.Context, _ sessionProfile, state func(string), probe func(verifiedNode)) error {
+				attempts++
+				if attempts == 1 {
+					probe(verifiedNode{"north", "North"})
+					return errors.New("unexpected exit")
+				}
+				if attempts == 2 {
+					return errors.New("still unavailable")
+				}
+				probe(verifiedNode{"west", "West"})
+				<-ctx.Done()
+				return ctx.Err()
+			},
+		}
+		expect := func(want string) {
+			t.Helper()
+			select {
+			case got := <-alerts:
+				if got != want {
+					t.Fatalf("alert = %q, want %q", got, want)
+				}
+			case <-time.After(20 * time.Second):
+				t.Fatalf("missing alert %q", want)
+			}
+		}
+		if _, _, err := d.handle(Request{Action: "start", Profile: "office"}); err != nil {
+			t.Fatal(err)
+		}
+		expect("Connected · office · North")
+		expect("Connection lost · office · North")
+		expect("Connection recovered · office · North → West")
+		if _, _, err := d.handle(Request{Action: "stop"}); err != nil {
+			t.Fatal(err)
+		}
+		expect("Disconnected · office · West")
+
+		select {
+		case got := <-alerts:
+			t.Fatalf("unexpected alert %q", got)
+		default:
+		}
+	})
 }

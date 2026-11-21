@@ -95,7 +95,7 @@ func TestResumeBackgroundRecoversAbsentChildAndPreservesLiveIntent(t *testing.T)
 				t.Fatal(err)
 			}
 			started := make(chan struct{})
-			d := &daemon{ctx: context.Background(), root: c.root, controller: c, status: Status{State: "stopped", SavedProfile: "office"}, load: func(string) (sessionProfile, error) { return sessionProfile{}, nil }, run: func(ctx context.Context, _ sessionProfile, _ func(string)) error {
+			d := &daemon{ctx: context.Background(), root: c.root, controller: c, status: Status{State: "stopped", SavedProfile: "office"}, load: func(string) (sessionProfile, error) { return sessionProfile{}, nil }, run: func(ctx context.Context, _ sessionProfile, _ func(string), _ func(verifiedNode)) error {
 				close(started)
 				<-ctx.Done()
 				return nil
